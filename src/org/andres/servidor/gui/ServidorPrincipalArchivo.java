@@ -1,16 +1,15 @@
 package org.andres.servidor.gui;
 
+import org.andres.conexion.ClienteUDP;
 import org.andres.dto.MiDatagrama;
 
 import javax.swing.*;
 import java.awt.*;
 import java.awt.event.ActionEvent;
 import java.awt.event.ActionListener;
-import java.io.DataInputStream;
-import java.io.DataOutputStream;
-import java.io.File;
-import java.io.IOException;
+import java.io.*;
 import java.net.*;
+import java.nio.file.Files;
 import java.util.ArrayList;
 import java.util.Random;
 import java.util.logging.Level;
@@ -21,11 +20,10 @@ public class ServidorPrincipalArchivo extends JFrame implements ActionListener {
     private final String titulo = "Servidor";
     private final String letra = "Arial";
     private final String error = "Error";
-    private boolean estadoServidor = false;
     private DatagramSocket socketudp;
     private volatile boolean ejecucion = false;
 
-    private final ArrayList<Socket> clientesServ = new ArrayList<>();
+    private final ArrayList<ClienteUDP> clientesServ = new ArrayList<>();
     private final ArrayList<Integer> idEnUso = new ArrayList<>();
     private JLabel labelIconoServidor;
     private JLabel tituloServidor;
@@ -171,40 +169,79 @@ public class ServidorPrincipalArchivo extends JFrame implements ActionListener {
     }
 
     public void encenderServidor(int puerto){
-        areaMensajes.append(STR."Servidor UDP iniciado en el puerto\{puerto}\n");
         byte[] buf = new byte[1000];
 
-            new Thread(() -> {
+        new Thread(() -> {
             DatagramPacket dp = null;
             try {
                 socketudp = new DatagramSocket(puerto);
                 ejecucion = true;
 
+                this.campoTextPuerto.setText(String.valueOf(puerto));
+
                 configurarBotones(1);
 
                 while (ejecucion) {
-
-                    areaMensajes.append("Escuchando ...\n");
 
                     dp = new DatagramPacket(buf, buf.length);
 
                     socketudp.receive(dp); // aquí se bloquea esperando mensajes
 
-                    String elmensaje = new String(dp.getData(), 0, dp.getLength()); // mejor con getLength()
-                    areaMensajes.append("El mensaje recibido es " + elmensaje + "\n");
+                    String elmensaje = new String(dp.getData(), 0, dp.getLength());
 
-                    DatagramPacket mensajeServ = MiDatagrama.crearDataG(
-                            dp.getAddress().getHostAddress(),
-                            dp.getPort(),
-                            "Mensaje recibido en el servidor"
-                    );
-                    socketudp.send(mensajeServ);
+                    if (elmensaje.equalsIgnoreCase("ping")) {
+
+                        String respuesta = "pong";
+                        byte[] datosRespuesta = respuesta.getBytes();
+
+                        DatagramPacket paqueteRespuesta = new DatagramPacket(
+                                datosRespuesta,
+                                datosRespuesta.length,
+                                dp.getAddress(),
+                                dp.getPort()
+                        );
+
+                        socketudp.send(paqueteRespuesta);
+                        continue;
+                    }
+
+                    if (elmensaje.startsWith("CONNECT:")) {
+
+                        String[] partes = elmensaje.split(":");
+                        int puertoEscucha = Integer.parseInt(partes[1]);
+
+                        int nuevoId = generarIdUnico(idEnUso);
+                        idEnUso.add(nuevoId);
+
+                        ClienteUDP nuevoCliente = new ClienteUDP(nuevoId, dp.getAddress(), puertoEscucha);
+                        clientesServ.add(nuevoCliente);
+
+                        areaMensajes.append("Cliente " + nuevoId + " conectado desde " + dp.getAddress().getHostAddress() + ":" + puertoEscucha + "\n");
+
+                        actualizarCombo();
+                        enviarIdACliente(nuevoCliente);
+                        enviarListaClientes();
+                    }
+                    else if(elmensaje.startsWith("DESCONECTAR:")) {
+
+                        String[] partes = elmensaje.split(":");
+                        int clienteId = Integer.parseInt(partes[1]);
+
+                        areaMensajes.append("Cliente " + clienteId + " se ha desconectado.\n");
+
+                        idEnUso.remove(idEnUso.indexOf(clienteId));
+
+                        clientesServ.removeIf(clienteUDP -> clienteUDP.getId() == clienteId);
+
+                        actualizarCombo();
+                    }
+                    else if (elmensaje.startsWith("FILE:")) {
+                        procesarArchivo(dp, elmensaje);
+                    }
                 }
 
-            } catch (SocketException ex) {
-                Logger.getLogger(PrincipalSrv.class.getName()).log(Level.SEVERE, null, ex);
             } catch (IOException ex) {
-                Logger.getLogger(PrincipalSrv.class.getName()).log(Level.SEVERE, null, ex);
+                Logger.getLogger(ServidorPrincipalArchivo.class.getName()).log(Level.SEVERE, null, ex);
             }
         }).start();
     }
@@ -214,9 +251,10 @@ public class ServidorPrincipalArchivo extends JFrame implements ActionListener {
         if (socketudp != null && !socketudp.isClosed()) {
             socketudp.close(); // Esto libera el puerto inmediatamente
         }
-        this.botonEncerderServ.setEnabled(true);
+        configurarBotones(2);
         areaMensajes.append("Servidor UDP apagado.\n");
     }
+
     public void configurarBotones(int decision){
 
         switch (decision){
@@ -242,22 +280,80 @@ public class ServidorPrincipalArchivo extends JFrame implements ActionListener {
         } while (verificarExistenciaServidor(puertoVer));
         return puertoVer;
     }
-    public boolean verificarExistenciaServidor(int puertoVer){
-        try (ServerSocket serverSocket = new ServerSocket(puertoVer)) {
-            // Si llegamos aquí, el puerto está libre
-            return false;
+    public boolean verificarExistenciaServidor(int puertoVer) {
+        try {
+            DatagramSocket socket = new DatagramSocket();
+            socket.setSoTimeout(500);
+
+            String mensaje = "ping";
+            byte[] datos = mensaje.getBytes();
+            InetAddress direccion = InetAddress.getByName("localhost");
+
+            DatagramPacket paquete = new DatagramPacket(datos, datos.length, direccion, puertoVer);
+            socket.send(paquete);
+
+            byte[] buffer = new byte[1024];
+            DatagramPacket respuesta = new DatagramPacket(buffer, buffer.length);
+
+            socket.receive(respuesta);
+
+            String resp = new String(respuesta.getData(), 0, respuesta.getLength());
+
+            socket.close();
+
+            return resp.equalsIgnoreCase("pong");
         } catch (IOException e) {
-            // Si falla, el puerto ya está en uso
-            return true;
+
+            return false;
         }
     }
 
+    private void enviarIdACliente(ClienteUDP cliente) {
+        String mensaje = "ID:" + cliente.getId() + " ";
+
+        byte[] datos = mensaje.getBytes();
+        try {
+            DatagramPacket paquete = new DatagramPacket(
+                    datos,
+                    datos.length,
+                    cliente.getDireccion(),
+                    cliente.getPuerto()
+            );
+            socketudp.send(paquete);
+        } catch (IOException e) {
+            e.printStackTrace();
+        }
+    }
+    private void procesarArchivo(DatagramPacket dp, String encabezado) {
+        try {
+            // Mensaje esperado: FILE:nombreArchivo:tamaño
+            String[] partes = encabezado.split(":");
+            String nombreArchivo = partes[1];
+            long tamanio = Long.parseLong(partes[2]);
+
+            byte[] contenido = dp.getData();
+
+            File carpeta = new File("Archivos/Servidor");
+            if (!carpeta.exists()) carpeta.mkdirs();
+
+            File archivoRecibido = new File(carpeta, nombreArchivo);
+            try (FileOutputStream fos = new FileOutputStream(archivoRecibido)) {
+                fos.write(contenido, encabezado.length(), dp.getLength() - encabezado.length());
+            }
+
+            areaMensajes.append("Archivo recibido:" + nombreArchivo + "," + tamanio +"bytes\n");
+
+        } catch (Exception e) {
+            e.printStackTrace();
+            areaMensajes.append("Error al recibir archivo\n");
+        }
+    }
     public void actualizarCombo() {
         SwingUtilities.invokeLater(() -> {
             try{
                 comboClientes.removeAllItems();
                 int i = 0;
-                for (Socket cliente : clientesServ) {
+                for (ClienteUDP cliente : clientesServ) {
                     comboClientes.addItem("Cliente " + idEnUso.get(i));
                     i++;
                 }
@@ -274,49 +370,74 @@ public class ServidorPrincipalArchivo extends JFrame implements ActionListener {
         return id;
     }
 
-    public void actualizarAClientesLista(){
-        StringBuilder listaClientes = new StringBuilder("LIST:Servidor,Todos,");
-        String clientes = "Cliente ";
+    private void enviarListaClientes() {
+        StringBuilder sb = new StringBuilder();
+        sb.append("LIST:Servidor,Todos");
 
-        for (Integer idClientes : idEnUso){
-            listaClientes.append(clientes).append(idClientes).append(",");
+        for (ClienteUDP c : clientesServ) {
+            sb.append(",Cliente ").append(c.getId());
         }
 
-        if(!idEnUso.isEmpty()){
-            listaClientes.deleteCharAt(listaClientes.length() - 1);
+        String listaFinal = sb.toString();
+        byte[] datos = listaFinal.getBytes();
+
+        for (ClienteUDP c : clientesServ) {
+            try {
+                DatagramPacket paquete = new DatagramPacket(
+                        datos,
+                        datos.length,
+                        c.getDireccion(),
+                        c.getPuerto()
+                );
+                socketudp.send(paquete);
+            } catch (IOException e) {
+                e.printStackTrace();
+            }
         }
-
-        String lista = listaClientes.toString();
-
-        //for(ClientHandlerFinal cliente : listaClientesManejados){
-        //    cliente.enviarMensajeCliente(lista);
-        //}
-
     }
 
-    //public void enviarArchivoTodos(String nombreArchivo, long tamanio, byte[] contenido, int idClienteRemitente) {
+    public void enviarArchivoTodos(String nombreArchivo) {
+        try {
+            File archivo = new File("Archivos/Servidor", nombreArchivo);
+            byte[] contenido = Files.readAllBytes(archivo.toPath());
 
-    //    String mensaje = "El cliente " + idClienteRemitente + " envió el archivo: " + nombreArchivo;
+            for (ClienteUDP cliente : clientesServ) {
+                DatagramPacket paquete = new DatagramPacket(
+                        contenido,
+                        contenido.length,
+                        cliente.getDireccion(),
+                        cliente.getPuerto()
+                );
+                socketudp.send(paquete);
+            }
+            areaMensajes.append("Archivo enviado a todos los clientes.\n");
+        } catch (IOException e) {
+            e.printStackTrace();
+        }
+    }
 
-    //    for (ClientHandlerFinal cliente : listaClientesManejados) {
-    //        cliente.enviarArchivoCliente(nombreArchivo, tamanio, contenido, mensaje);
-    //    }
-    //}
+    public void enviarArchivoUnico(String nombreArchivo, int idCliente) {
+        try {
+            File archivo = new File("Archivos/Servidor", nombreArchivo);
+            byte[] contenido = Files.readAllBytes(archivo.toPath());
 
-
-    //public void enviarArchivoDedicado(String nombreArchivo, long tamanio, byte[] contenido, int idClienteEnviar, int idClienteRemitente) {
-    //    String notificacion = "El cliente " + idClienteRemitente + " te envió el archivo: " + nombreArchivo;
-
-    //    for (ClientHandlerFinal cliente : listaClientesManejados) {
-    //        if (cliente.getClientId() == idClienteEnviar) {
-    //            cliente.enviarArchivoCliente(nombreArchivo, tamanio, contenido, notificacion);
-    //        }
-    //    }
-    //}
-
-    //public void removerCliente(ClientHandlerFinal cliente) {
-    //    listaClientesManejados.remove(cliente);
-    //}
+            for (ClienteUDP cliente : clientesServ) {
+                if (cliente.getId() == idCliente) {
+                    DatagramPacket paquete = new DatagramPacket(
+                            contenido,
+                            contenido.length,
+                            cliente.getDireccion(),
+                            cliente.getPuerto()
+                    );
+                    socketudp.send(paquete);
+                    areaMensajes.append("Archivo enviado al cliente " + idCliente + "\n");
+                    break;
+                }
+            }
+        } catch (IOException e) {
+            e.printStackTrace();
+        }
+    }
 
     public  static void main(String args[]){
         java.awt.EventQueue.invokeLater(new Runnable() {
