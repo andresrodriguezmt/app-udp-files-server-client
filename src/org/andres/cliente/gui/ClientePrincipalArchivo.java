@@ -135,7 +135,7 @@ public class ClientePrincipalArchivo extends JFrame implements ActionListener {
         this.tituloArchivos.setBounds(30, 315, 150, 10);
         this.textoArchivo.setBounds(30, 335, 250, 25);
 
-        this.botonSelecArch.setBounds(30, 370, 100, 30);
+        this.botonSelecArch.setBounds(30, 370, 120, 30);
         this.botonEnviarArch.setBounds(170, 370, 100,30);
 
         this.tituloMensajes.setBounds(30,425, 100,10);
