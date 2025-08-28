@@ -276,7 +276,7 @@ public class ServidorPrincipalArchivo extends JFrame implements ActionListener {
         Random rand = new Random();
         int puertoVer;
         do {
-            puertoVer = rand.nextInt(16000 - 15000 + 1) + 15000;
+            puertoVer = rand.nextInt(15100 - 15000 + 1) + 15000;
         } while (verificarExistenciaServidor(puertoVer));
         return puertoVer;
     }
@@ -326,26 +326,40 @@ public class ServidorPrincipalArchivo extends JFrame implements ActionListener {
     }
     private void procesarArchivo(DatagramPacket dp, String encabezado) {
         try {
-            // Mensaje esperado: FILE:nombreArchivo:tamaño
+            // FILE:idCliente:Destino:Nombre:Tamaño
             String[] partes = encabezado.split(":");
-            String nombreArchivo = partes[1];
-            long tamanio = Long.parseLong(partes[2]);
+            String destino = partes[1];
+            String nombreArchivo = partes[2];
+            long tamanio = Long.parseLong(partes[3]);
+            int idCliente = Integer.parseInt(String.valueOf(partes[4]));
 
-            byte[] contenido = dp.getData();
 
-            File carpeta = new File("Archivos/Servidor");
-            if (!carpeta.exists()) carpeta.mkdirs();
+            if (destino.equalsIgnoreCase("Servidor")) {
+                File carpeta = new File("Archivos/Servidor");
+                if (!carpeta.exists()) carpeta.mkdirs();
+                File archivoRecibido = new File(carpeta, nombreArchivo);
 
-            File archivoRecibido = new File(carpeta, nombreArchivo);
-            try (FileOutputStream fos = new FileOutputStream(archivoRecibido)) {
-                fos.write(contenido, encabezado.length(), dp.getLength() - encabezado.length());
+                areaMensajes.append("Cliente " + idCliente + " envio archivo a servidor \n");
+                try (FileOutputStream fos = new FileOutputStream(archivoRecibido)) {
+                    long total = 0;
+                    byte[] buffer = new byte[1024];
+                    while (total < tamanio) {
+                        DatagramPacket bloque = new DatagramPacket(buffer, buffer.length);
+                        socketudp.receive(bloque);
+                        fos.write(bloque.getData(), 0, bloque.getLength());
+                        total += bloque.getLength();
+                    }
+                }
+                areaMensajes.append("Archivo guardado en Servidor: " + nombreArchivo + "\n");
+
+            } else if (destino.startsWith("Cliente")) {
+                int id = Integer.parseInt(destino.split(" ")[1]);
+                reenviarACliente(encabezado, id, idCliente);
             }
-
-            areaMensajes.append("Archivo recibido:" + nombreArchivo + "," + tamanio +"bytes\n");
 
         } catch (Exception e) {
             e.printStackTrace();
-            areaMensajes.append("Error al recibir archivo\n");
+            areaMensajes.append("Error al procesar archivo\n");
         }
     }
     public void actualizarCombo() {
@@ -372,7 +386,7 @@ public class ServidorPrincipalArchivo extends JFrame implements ActionListener {
 
     private void enviarListaClientes() {
         StringBuilder sb = new StringBuilder();
-        sb.append("LIST:Servidor,Todos");
+        sb.append("LIST:Servidor");
 
         for (ClienteUDP c : clientesServ) {
             sb.append(",Cliente ").append(c.getId());
@@ -396,49 +410,44 @@ public class ServidorPrincipalArchivo extends JFrame implements ActionListener {
         }
     }
 
-    public void enviarArchivoTodos(String nombreArchivo) {
-        try {
-            File archivo = new File("Archivos/Servidor", nombreArchivo);
-            byte[] contenido = Files.readAllBytes(archivo.toPath());
 
-            for (ClienteUDP cliente : clientesServ) {
-                DatagramPacket paquete = new DatagramPacket(
-                        contenido,
-                        contenido.length,
-                        cliente.getDireccion(),
-                        cliente.getPuerto()
-                );
-                socketudp.send(paquete);
+    private void reenviarACliente(String encabezado, int id, int idEnvia) throws IOException {
+        for (ClienteUDP c : clientesServ) {
+            if (c.getId() == id) {
+                DatagramPacket headerPacket = new DatagramPacket(encabezado.getBytes(), encabezado.getBytes().length, c.getDireccion(), c.getPuerto());
+                socketudp.send(headerPacket);
+
+                ArrayList<ClienteUDP> soloUno = new ArrayList<>();
+                soloUno.add(c);
+                reenviarContenidoAClientes(soloUno);
+
+                areaMensajes.append("Cliente "+ idEnvia + " envio archivo a Cliente " + id + "\n");
+                break;
             }
-            areaMensajes.append("Archivo enviado a todos los clientes.\n");
-        } catch (IOException e) {
-            e.printStackTrace();
         }
     }
 
-    public void enviarArchivoUnico(String nombreArchivo, int idCliente) {
-        try {
-            File archivo = new File("Archivos/Servidor", nombreArchivo);
-            byte[] contenido = Files.readAllBytes(archivo.toPath());
+    private void reenviarContenidoAClientes(ArrayList<ClienteUDP> destinos) throws IOException {
+        byte[] buffer = new byte[1024];
+        while (true) {
+            DatagramPacket bloque = new DatagramPacket(buffer, buffer.length);
+            socketudp.receive(bloque);
 
-            for (ClienteUDP cliente : clientesServ) {
-                if (cliente.getId() == idCliente) {
-                    DatagramPacket paquete = new DatagramPacket(
-                            contenido,
-                            contenido.length,
-                            cliente.getDireccion(),
-                            cliente.getPuerto()
-                    );
-                    socketudp.send(paquete);
-                    areaMensajes.append("Archivo enviado al cliente " + idCliente + "\n");
-                    break;
+            String msg = new String(bloque.getData(), 0, bloque.getLength());
+            if ("EOF".equals(msg)) {
+                for (ClienteUDP c : destinos) {
+                    DatagramPacket fin = new DatagramPacket(msg.getBytes(), msg.length(), c.getDireccion(), c.getPuerto());
+                    socketudp.send(fin);
                 }
+                break;
             }
-        } catch (IOException e) {
-            e.printStackTrace();
+
+            for (ClienteUDP c : destinos) {
+                DatagramPacket nuevo = new DatagramPacket(bloque.getData(), bloque.getLength(), c.getDireccion(), c.getPuerto());
+                socketudp.send(nuevo);
+            }
         }
     }
-
     public  static void main(String args[]){
         java.awt.EventQueue.invokeLater(new Runnable() {
             public void run() {

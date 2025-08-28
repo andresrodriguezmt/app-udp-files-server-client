@@ -25,6 +25,8 @@ public class ClientePrincipalArchivo extends JFrame implements ActionListener {
     private ArrayList<Integer> listaServidores = new ArrayList<>();
     private File[] archivo = new File[1];
 
+    private String carpetaCliente;
+
     private JLabel labelIconoCliente;
     private JLabel tituloCliente;
     private JLabel tituloServidores;
@@ -228,7 +230,7 @@ public class ClientePrincipalArchivo extends JFrame implements ActionListener {
             DatagramPacket paquete = new DatagramPacket(buffer, buffer.length, direccion, puerto);
             socketCliente.send(paquete);
 
-            areaMensajes.append("Conexión con servidor UDP realizada");
+            areaMensajes.append("Conexión con servidor UDP realizada \n");
             System.out.println("hola" + miPuertoCliente);
             escucharServidor();
             configurarBotones(1);
@@ -273,7 +275,7 @@ public class ClientePrincipalArchivo extends JFrame implements ActionListener {
         listaServidores.clear();
         int timeout = 1; // ms
 
-        for (int puerto = 15000; puerto <= 16000; puerto++) {
+        for (int puerto = 15000; puerto <= 15100; puerto++) {
             try (DatagramSocket socket = new DatagramSocket()) {
                 socket.setSoTimeout(timeout);
 
@@ -343,62 +345,57 @@ public class ClientePrincipalArchivo extends JFrame implements ActionListener {
     }
 
     public void enviarArchivoUDP(int puerto) {
-        try (DatagramSocket udpSocket = new DatagramSocket();) {
-
+        try {
             if (archivo[0] == null) {
-                JOptionPane.showMessageDialog(this,
-                        "Debe seleccionar un archivo primero",
-                        "Error",
-                        JOptionPane.ERROR_MESSAGE);
+                JOptionPane.showMessageDialog(this, "Debe seleccionar un archivo primero", "Error", JOptionPane.ERROR_MESSAGE);
                 return;
             }
 
             InetAddress direccion = InetAddress.getByName("localhost");
+            String destino = (String) comboListaFunciones.getSelectedItem();
 
-            // Enviar encabezado con nombre y tamaño
-            String encabezado = "FILE:"+ archivo[0].getName() + ":" + archivo[0].length();
+            // Enviar encabezado
+            String encabezado = "FILE:" + destino + ":" + archivo[0].getName() + ":" + archivo[0].length() + ":" + miIdCliente;
+            DatagramPacket headerPacket = new DatagramPacket(encabezado.getBytes(), encabezado.getBytes().length, direccion, puerto);
+            socketCliente.send(headerPacket);
 
-            byte[] header = encabezado.getBytes();
-            DatagramPacket headerPacket = new DatagramPacket(header, header.length, direccion, puerto);
-            udpSocket.send(headerPacket);
+            // Enviar contenido en bloques
+            byte[] buffer = new byte[1024];
+            try (FileInputStream fis = new FileInputStream(archivo[0])) {
+                int bytesRead;
+                while ((bytesRead = fis.read(buffer)) != -1) {
+                    DatagramPacket filePacket = new DatagramPacket(buffer, bytesRead, direccion, puerto);
+                    socketCliente.send(filePacket);
+                }
+            }
 
-            // Enviar contenido
-            byte[] contenido = Files.readAllBytes(archivo[0].toPath());
-            DatagramPacket filePacket = new DatagramPacket(contenido, contenido.length, direccion, puerto);
-            udpSocket.send(filePacket);
+            // Enviar EOF
+            byte[] fin = "EOF".getBytes();
+            DatagramPacket finPacket = new DatagramPacket(fin, fin.length, direccion, puerto);
+            socketCliente.send(finPacket);
 
-            areaMensajes.append("Archivo enviado: " + archivo[0].getName() + "\n");
+            areaMensajes.append("Archivo enviado a " + destino + ": " + archivo[0].getName() + "\n");
 
         } catch (Exception e) {
             e.printStackTrace();
-            JOptionPane.showMessageDialog(this,
-                    "Error al enviar archivo UDP",
-                    "Error",
-                    JOptionPane.ERROR_MESSAGE);
         }
     }
-
     private void escucharServidor() {
         new Thread(() -> {
             byte[] buffer = new byte[1024];
             DatagramPacket paquete = new DatagramPacket(buffer, buffer.length);
 
             while (true) {
-
                 try{
-
                     socketCliente.receive(paquete);
                     String msg = new String(paquete.getData(), 0, paquete.getLength());
 
-
                     if(msg.startsWith("ID:")){
+                        miIdCliente = Integer.parseInt(msg.substring(3).trim());
+                        this.carpetaCliente = "archivos/clientes";
 
-                        String mensaje = msg.substring(3);
-                        miIdCliente = Integer.parseInt(mensaje.trim());
-
-                    }else if (msg.startsWith("LIST:")) {
-
-                        String lista = msg.substring(5); // quitar "LIST:"
+                    } else if (msg.startsWith("LIST:")) {
+                        String lista = msg.substring(5);
                         String[] elementos = lista.split(",");
                         SwingUtilities.invokeLater(() -> {
                             comboListaFunciones.removeAllItems();
@@ -406,17 +403,46 @@ public class ClientePrincipalArchivo extends JFrame implements ActionListener {
                                 if (!elem.isBlank()) comboListaFunciones.addItem(elem);
                             }
                         });
-                    }
-                }catch (SocketException e) {
 
-                    if (socketCliente.isClosed()) {
-                        break;
+                    } else if (msg.startsWith("FILE:")) {
+                        recibirArchivo(msg);
                     }
-                }catch (IOException e) {
+
+                } catch (SocketException e) {
+                    if (socketCliente.isClosed()) break;
+                } catch (IOException e) {
                     e.printStackTrace();
                 }
             }
         }).start();
+    }
+
+    private void recibirArchivo(String encabezado) {
+        try {
+            String[] partes = encabezado.split(":");
+            String nombreArchivo = partes[2];
+
+            File archivoDestino = new File(carpetaCliente, nombreArchivo);
+            try (FileOutputStream fos = new FileOutputStream(archivoDestino)) {
+                long total = 0;
+                byte[] buffer = new byte[1024];
+
+                while (true) {
+                    DatagramPacket dp = new DatagramPacket(buffer, buffer.length);
+                    socketCliente.receive(dp);
+
+                    String msg = new String(dp.getData(), 0, dp.getLength());
+                    if ("EOF".equals(msg)) break;
+
+                    fos.write(dp.getData(), 0, dp.getLength());
+                    total += dp.getLength();
+                }
+
+                areaMensajes.append("Archivo recibido: " + nombreArchivo + " (" + total + " bytes)\n");
+            }
+        } catch (Exception e) {
+            e.printStackTrace();
+        }
     }
 
     public static void main(String[] args){
